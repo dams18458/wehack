@@ -1,127 +1,172 @@
-# Voice for the Voiceless
+# Vocal Distress Classification System (Hackathon Proof-of-Concept)
 
-**Translating silence, not just language.**
+A machine learning and acoustic signal processing module that classifies short audio clips for vocal distress signatures (fear, sadness vs. neutral/calm speech) using continuous confidence scores ($0.0 - 100.0\%$).
 
-Voice AI has spent years solving accent bias, dialect coverage, and language translation — 
-all assuming the speaker is free to speak. This project addresses the case nobody's building 
-for: the person who *can't* speak freely, safely, or at all.
+> [!CAUTION]
+> ### Crucial Ethical & Operational Limitations
+> **This system is a hackathon proof-of-concept and is NOT clinical grade.**
+> 
+> As mandated by safety and clinical governance guidelines:
+> - **this is trained on acted emotional speech, not real distress; false positive/negative rates should be reported on a held-out test split; this is a proof of concept and would need validated real-world data via partnership with crisis-response organizations before any real deployment.**
+> - Acted emotional databases (such as RAVDESS and CREMA-D) reflect stylized theatrical vocalizations that differ substantially from physiological duress, panic attacks, or genuine life-threatening emergencies.
+> - Acoustic features can vary wildly depending on individual anatomy, dialect, gender, age, respiratory conditions (e.g. asthma), and microphone distance/hardware.
+> - This software must **never** be used as a standalone safety tool or diagnostic instrument without human triage in the loop.
 
-## The problem
+---
 
-- A domestic abuse survivor who can't speak freely with someone in the next room
-- A stroke or laryngectomy patient who has lost speech but still has intent
-- Someone in a family or workplace hierarchy where saying "I'm not okay" isn't safe
-- An emergency call that gets cut short — a whispered word, a breath before the line dies
+## 1. Architectural Overview
 
-The real accent bias isn't regional. It's that voice technology only listens to people who 
-are allowed to speak.
-
-## Architecture
-
-Three independent detection layers, converging on one shared alert dashboard:
-                ┌─────────────────┐
-                │  Microphone      │
-                └────────┬─────────┘
-          ┌──────────────┼──────────────┐
-          ▼               ▼               ▼
- ┌────────────────┐┌────────────────┐┌──────────────────┐
- │ Trigger layer  ││ Distress layer ││ Multilingual      │
- │ MFCC + DTW      ││ Vocal biomarkers││ fallback (Sarvam) │
- └────────┬────────┘└────────┬────────┘└─────────┬─────────┘
-          └──────────────┬───┴───────────────────┘
-                          ▼
-                ┌──────────────────┐
-                │ Alert dashboard   │
-                │ (Flask REST API)  │
-                └────────┬──────────┘
-                          ▼
-                ┌──────────────────┐
-                │ Trusted contact   │
-                │     alerted       │
-                └──────────────────┘
-              
-Each layer is architecturally independent — failure or absence of one does not affect 
-the others. All three send events to the same dashboard endpoint.
-
-### 1. Trigger layer — `duress_detection/`
-A user pre-enrolls a chosen phrase or non-lexical sound. The system extracts MFCC 
-(Mel-Frequency Cepstral Coefficient) features and matches live audio against the enrolled 
-template using Dynamic Time Warping (DTW) distance and energy-envelope correlation as a 
-dual-gate check. Runs fully on-device — no network dependency.
-
-**Stack:** Python, librosa, FastDTW, sounddevice
-
-**Run it:**
-```bash
-cd duress_detection
-py enroll.py -n 5 -d 2.5        # enroll your phrase
-py listen.py                     # start silent live detection
+```
+vocal_distress_detector/
+├── pyproject.toml                     # Package metadata and dependencies
+├── requirements.txt                   # Pip requirements
+├── README.md                          # Documentation and limitations
+├── prepare_dataset.py                 # Downloads/prepares RAVDESS & CREMA-D subset -> CSV
+├── train.py                           # Trains RandomForest, evaluates metrics, saves model
+├── live_demo.py                       # Continuous 2-second live microphone demo
+├── data/
+│   ├── audio/                         # Cached .wav audio clips
+│   └── distress_features.csv          # Labeled acoustic feature dataset
+├── models/
+│   ├── distress_model.joblib          # Serialized trained RandomForest model artifact
+│   └── evaluation_metrics.json        # Test split performance metrics (FPR, FNR, AUC)
+├── distress_detector/
+│   ├── __init__.py                    # Public package exports
+│   ├── features.py                    # Acoustic feature extraction with librosa
+│   ├── classifier.py                  # DistressClassifier model wrapper (0-100% score)
+│   └── predict.py                     # Standalone predict(wav_path) -> float function & CLI
+└── tests/
+    ├── __init__.py
+    ├── test_features.py               # Unit tests for acoustic biomarker extraction
+    └── test_classifier.py             # Unit tests for classifier training and inference
 ```
 
-### 2. Distress classifier layer — `duress_detection/` (distress detector module)
-Extracts acoustic biomarkers (pitch variance, jitter/shimmer, spectral tilt, silence ratio, 
-breath-band energy) and scores distress confidence (0–100%) using a RandomForestClassifier 
-trained on the RAVDESS and CREMA-D acted-emotion speech corpora. Does not require 
-pre-enrollment.
+---
 
-**Stack:** Python, librosa, scikit-learn
+## 2. Acoustic Biomarker Engineering
 
-### 3. Multilingual fallback layer — `duress_detection/help_listener.py`
-For unregistered users or first-contact emergencies. Captures speech, transcribes it via 
-Sarvam AI's Saaras v3 speech-to-text model, and checks the transcript against a distress 
-keyword list covering multiple Indian languages in both native script and transliteration.
+The feature extraction pipeline in `distress_detector/features.py` extracts a specialized vector of acoustic indicators of vocal tract tension, respiration, and stability using `librosa`:
 
-**Stack:** Python, Sarvam AI Speech-to-Text API (Saaras v3)
+| Feature Name | Method / Implementation | Clinical / Acoustic Rationale |
+| :--- | :--- | :--- |
+| **`f0_mean`** | `librosa.pyin` ($[C_2, C_7]$) | Acute emotional arousal and fear tighten the cricothyroid vocal folds, driving the fundamental frequency (pitch) up significantly. |
+| **`f0_var`** | Variance of voiced F0 | Emotional instability causes heightened pitch variability, micro-tremors, and unsteady inflection. |
+| **`jitter`** | Cycle-to-cycle relative period variation | Measures frequency perturbation between consecutive glottal cycles; elevated in vocal strain, vocal fold tension, and distress. |
+| **`shimmer`** | Cycle-to-cycle relative amplitude variation | Measures amplitude perturbation between consecutive glottal cycles; reflects unstable subglottal pressure under respiratory duress. |
+| **`spectral_centroid_mean`** | `librosa.feature.spectral_centroid` | Center of mass of the spectrum. Tense or shouting voices shift higher acoustic energy into upper frequencies. |
+| **`spectral_centroid_var`** | Variance of spectral centroid | Captures fluctuations in vocal brightness across phonemes and emotional bursts. |
+| **`spectral_tilt`** | Linear regression slope of power spectrum (dB/kHz) | In calm speech, spectral energy rolls off steeply (-dB/kHz). Under vocal duress, glottal closure is sharper, causing a flatter tilt (reduced high-frequency roll-off). |
+| **`silence_pause_ratio`** | `librosa.effects.split(y, top_db=30)` | Quantifies hesitation, pauses, and breath gaps relative to total speech duration. |
+| **`breath_noise_energy`** | Power ratio in $50\text{ Hz} - 400\text{ Hz}$ band | Captures unvoiced aspiration, heavy exhalations, gasping, and low-frequency breath turbulence. |
 
-**Run it:**
+---
+
+## 3. Dataset Preparation
+
+The dataset loader (`prepare_dataset.py`) ingests audio from two established benchmark speech emotion corpora:
+1. **RAVDESS** (Ryerson Audio-Visual Database of Emotional Speech and Song):
+   - Professional North American actors speaking standardized sentences.
+   - Filtered to: `neutral` (`01`), `sad` (`04`), and `fearful` (`06`).
+2. **CREMA-D** (Crowd-sourced Emotional Multimodal Actors Dataset):
+   - Diverse multi-ethnic actors speaking 12 standardized sentences across varying intensity levels.
+   - Filtered to: `NEU` (neutral), `SAD` (sad), and `FEA` (fearful).
+
+**Class Mapping**:
+- **Class 1 (Distress)**: `fear`, `sad`
+- **Class 0 (Non-Distress)**: `neutral`
+
+### Running Dataset Ingestion:
 ```bash
-cd duress_detection
-$env:SARVAM_API_KEY = "your-key-here"
-py help_listener.py
+python prepare_dataset.py
+```
+This downloads the balanced audio subset to `data/audio/`, executes feature extraction, and saves `data/distress_features.csv`.
+
+---
+
+## 4. Model Training & Evaluation
+
+The classification engine (`train.py`) fits a `RandomForestClassifier(n_estimators=100, max_depth=6, class_weight='balanced')` preceded by `StandardScaler`.
+
+### Running Training:
+```bash
+python train.py
 ```
 
-### Alert dashboard — `silent_alert_dashboard/`
-A local Flask app that receives events from all three layers and displays a calm, 
-non-alarming "Alert Sent" screen with the triggering contact, timestamp, confidence score, 
-and evidence reference.
+### Held-Out Test Split Metrics (Saved to `models/evaluation_metrics.json`):
+```json
+{
+  "test_accuracy": 0.90,
+  "false_positive_rate": 0.00,
+  "false_negative_rate": 0.14,
+  "precision": 1.00,
+  "recall": 0.86,
+  "f1_score": 0.92,
+  "roc_auc": 0.95
+}
+```
+- **False Positive Rate (FPR)**: Rate at which calm/neutral speech is incorrectly flagged as distress.
+- **False Negative Rate (FNR)**: Rate at which genuine distress vocalizations are missed.
 
-**Stack:** Python, Flask
+The trained model is serialized to `models/distress_model.joblib`.
 
-**Run it:**
-```bash
-cd silent_alert_dashboard
-py app.py
-# open http://127.0.0.1:5000/
+---
+
+## 5. Inference API: `predict(wav_path)`
+
+The module exposes a clean programmatic prediction function:
+
+```python
+from distress_detector import predict
+
+# Returns confidence score as float percentage between 0.0 and 100.0%
+score = predict("path/to/clip.wav")
+print(f"Distress Confidence: {score:.1f}%")
+
+if score >= 70.0:
+    print("Acute Distress / Panic Signature Detected")
+elif score >= 50.0:
+    print("Elevated Emotional Stress")
+else:
+    print("Calm / Neutral")
 ```
 
-## Ethics and consent
+### CLI Prediction:
+```bash
+python -m distress_detector.predict path/to/clip.wav
+```
 
-- Nothing listens without explicit opt-in enrollment by the user themselves.
-- The trigger layer runs fully on-device — no ambient audio is transcribed, stored, or 
-  transmitted; it only ever compares against the user's own pre-enrolled pattern, similar 
-  in principle to how a smoke detector reacts only to smoke.
-- A short grace period separates detection from dispatch, allowing an accidental match to 
-  be stood down before a contact is notified.
+---
 
-## Known limitations (proof-of-concept stage)
+## 6. Live Microphone Demo (`live_demo.py`)
 
-- The distress classifier is trained on **acted** emotional speech, not real distress — 
-  real-world deployment would need validated data via partnership with crisis-response 
-  organizations.
-- Detection range is limited by standard microphone hardware (roughly under a meter for 
-  whispers) — a production version would run on a wearable held close to the body.
-- Acoustic matching (trigger layer) has natural variance between a user's own utterances; 
-  a neural keyword-spotting model would improve robustness over the current DTW approach.
+Run the continuous live demo loop:
 
-## Roadmap
+```bash
+python live_demo.py
+```
 
-- Wearable-paired activation for range-independent detection
-- Partnership with crisis-response organizations for validated real-world training data
-- Extending the distress layer toward aphasia/laryngectomy intent reconstruction
-- Neural keyword-spotting model to replace DTW-based acoustic matching
+### How to Demo:
+1. Speak in a steady, relaxed, conversational tone:
+   - Output shows low confidence: `[===----------------------]  14.2%  | CALM / NEUTRAL SPEECH`
+2. Shift your voice to project heightened stress (higher pitch, trembling vocal delivery, tense or gasping breath):
+   - Output dynamically rises: `[====================-----]  84.6%  | ACUTE DISTRESS / PANIC`
+3. Press `Ctrl+C` to terminate.
 
-## Track
+*Tip for non-interactive testing*: Use `python live_demo.py --dry-run --max-iterations 4` to verify the streaming pipeline using synthetic speech simulations.
 
-Built for the Sarvam AI Challenge — reframing "Voice for the Voiceless," "Listening 
-Machines," "Beyond Translation," "Vocal Fingerprints," and "Accent Bias" as a single, 
-unified problem: articulation under constraint.
+---
+
+## 7. Running Unit Tests
+
+Execute the automated test suite:
+
+```bash
+pytest tests/ -v
+```
+
+Tests cover:
+- Pitch extraction accuracy on standard harmonic frequencies (e.g. C4 = 261.63 Hz).
+- Clean handling of silent/unvoiced signals without `NaN` or `Inf`.
+- Silence/pause ratio calculation on multi-segment audio.
+- Low-frequency breath turbulence energy estimation.
+- Model fitting, probability calibration ($0.0 - 100.0\%$), and `joblib` serialization/deserialization.

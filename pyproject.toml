@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vocal-distress-detector"
+version = "0.1.0"
+description = "Acoustic biomarker vocal distress classification module for hackathon proof-of-concept."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.26.0",
+    "scipy>=1.12.0",
+    "sounddevice>=0.4.6",
+    "soundfile>=0.12.1",
+    "librosa>=0.10.0",
+    "scikit-learn>=1.4.0",
+    "joblib>=1.3.0",
+    "pandas>=2.0.0",
+    "pytest>=8.0.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["distress_detector*"]
